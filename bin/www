@@ -1,0 +1,222 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('sudoku-race:server');
+var http = require('http');
+const Game = require("../Game");
+const Player = require("../Player");
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '5000');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+/**
+ * Create Socket.io server.
+ */
+var io = require('socket.io')(server);
+var games = [];
+var lastGameId = 0;
+var players = {};
+io.on('connection', function (socket) {  
+  console.log("user connected with id: " + socket.id);
+  socket.emit('user_data', { user_id: socket.id});
+  socket.on("create_game", function(data) {
+    let {roomName, username, mod} = data;
+    var gToAdd = new Game({roomName, id: lastGameId, mod});
+    var __pl = new Player({username, id: socket.id, game: gToAdd, socket, hosting: true});
+    gToAdd.addPlayer(__pl);
+    var board = gToAdd.getSudoku().getDefault();
+    console.log(gToAdd.getSudoku().getSolution());
+    socket.player = __pl;
+    players[socket.id] = __pl;
+    games.push(gToAdd);
+    socket.emit("game_data", {game_id: lastGameId, board, hosting: true, roomName, players: [{id: socket.id, username, hosting: true, ready: false, finished: false}]});
+    lastGameId++;
+  });
+  socket.on("disconnect", function() {
+    console.log(`user ${socket.id} disconnected`);
+    var g = null;
+    var ind = -1;
+    for(let i in games) {
+      let curr = games[i];
+      if(curr.getPlayers().map(pl => pl.getId()).includes(socket.id)) {
+        g = curr;
+        ind = i;
+      }
+    }
+    if(g) {
+      g.players = g.players.filter(pl => pl.id !== socket.id);
+      g.players.forEach(pl => {
+        pl.getSocket().emit('user_disconnected', {user_id: socket.id});
+      })
+    }
+  });
+  socket.on('connect_game', function(data) {
+    let {game_id, username} = data;
+    var gToJoin = null;
+    var ind = -1;
+    for(let i in games) {
+      let curr = games[i];
+      if(curr.id === game_id) {
+        gToJoin = curr;
+        ind = i;
+      }
+    }
+    if(gToJoin) {
+      if(gToJoin.isStarted) {
+        socket.emit("connection_error", {message: "Can not join. Game already started."});
+        return;
+      }
+      var __pl = new Player({username, id: socket.id, game: gToJoin, socket});
+      players[socket.id] = __pl;
+      gToJoin.getPlayers().forEach(pl => {
+        pl.getSocket().emit("player_joined", {username, id: socket.id, ready: false, hosting: false, finished: false, starting: -1});
+      });
+      gToJoin.addPlayer(__pl);
+      socket.emit("game_data", {game_id, board: gToJoin.getSudoku().getDefault(), ready: false, hosting: false, roomName: gToJoin.roomName, players: gToJoin.getPlayers().map(pl => ({id: pl.getId(), username: pl.getUsername(), hosting: pl.hosting, ready: false, finished: false}))});
+    }
+  });
+  socket.on('user_ready', function(data) {
+    let {game_id} = data;
+    var g = null;
+    var ind = -1;
+    for(let i in games) {
+      let curr = games[i];
+      if(curr.id === game_id) {
+        g = curr;
+        ind = i;
+      }
+    }
+    if(g) {
+      g.getPlayers().forEach(pl => {
+        pl.getSocket().emit('user_ready_update', {
+          user_id: socket.id
+        });
+      });
+    }
+  });
+  socket.on('start_game', function(data){
+    console.log(data);
+    let {game_id} = data;
+    var g = null;
+    var ind = -1;
+    for(let i in games) {
+      let curr = games[i];
+      if(curr.id === game_id) {
+        g = curr;
+        ind = i;
+      }
+    }
+    if(g) {
+      g.isStarted = true;
+      g.getPlayers().forEach(pl => {
+        pl.getSocket().emit('start_game_', {message: "start"});
+      });
+    }
+  });
+  socket.on('board_check', function(data) {
+    let {game_id, board, time_passed} = data;
+    var g = null;
+    var ind = -1;
+    for(let i in games) {
+      let curr = games[i];
+      if(curr.id === game_id) {
+        g = curr;
+        ind = i;
+      }
+    }
+    if(g) {
+      let sudoku = g.getSudoku();
+      let result = sudoku.isValidBoard(board);
+      if(result) {
+        socket.emit('true_solution', {
+          time_passed
+        });
+        players[socket.id].finished = true;
+        g.getPlayers().forEach(pl => {
+          pl.getSocket().emit("user_finished", {user_id: socket.id, time_passed});
+        });
+      }
+    } 
+  });
+});
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
